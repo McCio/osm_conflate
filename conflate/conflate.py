@@ -89,6 +89,7 @@ def run(
     osm=None,
     regions=None,
     overpass_url=None,
+    overpass_area=None,
     alt_overpass=False,
     contact=None,
     osc=False,
@@ -172,13 +173,19 @@ def run(
                 conflator.parse_osm(f)
         else:
             bbox_cache_dir = osm_path + '.d' if osm_path else None
-            conflator.download_osm(bbox_cache_dir=bbox_cache_dir)
+            conflator.download_osm(bbox_cache_dir=bbox_cache_dir, area_filter=overpass_area)
             if len(conflator.osmdata) > 0 and osm_path:
                 with open(osm_path, 'w') as f:
                     f.write(conflator.backup_osm())
                 if bbox_cache_dir and os.path.isdir(bbox_cache_dir):
                     shutil.rmtree(bbox_cache_dir)
         logging.info('Downloaded %s objects from OSM', len(conflator.osmdata))
+        if overpass_area and not conflator.osmdata:
+            logging.warning(
+                'No OSM objects downloaded with area filter active. '
+                'The area statement may have matched no Overpass area, '
+                'or the area genuinely contains no matching objects. '
+                'Area filter used: %s', overpass_area)
 
         conflator.match()
         auxiliary_tags = profile.get('auxiliary_tags', set())

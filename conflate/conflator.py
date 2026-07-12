@@ -42,9 +42,9 @@ class OsmConflator:
     def set_overpass(self, server='alt'):
         self.downloader.set_overpass(server)
 
-    def download_osm(self, bbox_cache_dir=None):
-        bboxes = self.downloader.calc_boxes(self.dataset.values())
-        self.osmdata = self.downloader.download(bboxes, bbox_cache_dir=bbox_cache_dir)
+    def download_osm(self, bbox_cache_dir=None, area_filter=None):
+        bboxes = self.downloader.calc_boxes(self.dataset.values(), area_filter=bool(area_filter))
+        self.osmdata = self.downloader.download(bboxes, bbox_cache_dir=bbox_cache_dir, area_filter=area_filter)
 
     def parse_osm(self, fileobj):
         self.osmdata = self.downloader.parse_xml(fileobj)

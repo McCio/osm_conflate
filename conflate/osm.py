@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import re
 import time
@@ -12,6 +13,8 @@ OVERPASS_SERVER = 'https://overpass-api.de/api/'
 ALT_OVERPASS_SERVER = 'https://overpass.kumi.systems/api/'
 OSM_API_SERVER = 'https://api.openstreetmap.org/api/0.6/'
 BBOX_PADDING = 0.003  # in degrees, ~330 m default
+_EARTH_RADIUS_KM = 6371.0
+_KM_PER_DEG = math.pi / 180 * _EARTH_RADIUS_KM
 
 
 class OsmDownloader:
@@ -36,9 +39,10 @@ class OsmDownloader:
                 s = s[:-len('interpreter')]
             OVERPASS_SERVER = s if s.endswith('/') else s + '/'
 
-    def construct_overpass_query(self, bboxes):
+    def construct_overpass_query(self, bboxes, area_filter=None):
         """Constructs an Overpass API query from the "query" list in the profile.
-        (k, v) turns into [k=v], (k,) into [k], (k, None) into [!k], (k, "~v") into [k~v]."""
+        (k, v) turns into [k=v], (k,) into [k], (k, None) into [!k], (k, "~v") into [k~v].
+        When area_filter is set (an Overpass area statement), it is combined with each bbox."""
         tags = self.profile.get(
             'query', required="a list of tuples. E.g. [('amenity', 'cafe'), ('name', '~Mc.*lds')]")
         tag_strs = []
@@ -72,19 +76,28 @@ class OsmDownloader:
             ref = 'nwr["ref:' + self.profile.get(
                 'dataset_id', required='A fairly unique id of the dataset to query OSM') + '"]'
         timeout = self.profile.get('overpass_timeout', 120)
-        query = '[out:xml]{};('.format('' if timeout is None else '[timeout:{}]'.format(timeout))
-        for bbox in bboxes:
+        timeout_str = '' if timeout is None else '[timeout:{}]'.format(timeout)
+        # area_filter is a complete Overpass area statement, e.g.:
+        #   area["name"="Venezia"]["admin_level"="6"]->.a
+        # When set, (area.a) is appended to every element selector, optionally combined with bbox.
+        area_suffix = '(area.a)' if area_filter else ''
+        header = '[out:xml]{};\n{};\n('.format(timeout_str, area_filter) if area_filter \
+            else '[out:xml]{};('.format(timeout_str)
+
+        query = header
+        for bbox in (bboxes or [None]):
             bbox_str = '' if bbox is None else '(' + ','.join([str(x) for x in bbox]) + ')'
             for tag_str in tag_strs:
-                query += 'nwr' + tag_str + bbox_str + ';'
+                query += 'nwr' + tag_str + bbox_str + area_suffix + ';'
         if ref is not None:
-            if not self.profile.get('bounded_update', False):
+            bounded = self.profile.get('bounded_update', False) or area_filter
+            if not bounded:
                 query += ref + ';'
             else:
-                for bbox in bboxes:
+                for bbox in (bboxes or [None]):
                     bbox_str = '' if bbox is None else '(' + ','.join(
                         [str(x) for x in bbox]) + ')'
-                    query += ref + bbox_str + ';'
+                    query += ref + bbox_str + area_suffix + ';'
         query += '); out meta qt center;'
         return query
 
@@ -100,13 +113,27 @@ class OsmDownloader:
             bbox[3] = max(bbox[3], p.lon + padding)
         return bbox
 
-    def split_into_bboxes(self, points):
+    @staticmethod
+    def _bbox_max_km(bbox):
+        """Return the largest dimension of a bbox in km."""
+        min_lat, min_lon, max_lat, max_lon = bbox
+        mid_lat = math.radians((min_lat + max_lat) / 2)
+        height = (max_lat - min_lat) * _KM_PER_DEG
+        width = abs((max_lon - min_lon) * _KM_PER_DEG * math.cos(mid_lat))
+        return max(height, width)
+
+    def split_into_bboxes(self, points, area_filter=False):
         """
         Splits the dataset into multiple bboxes to lower load on the overpass api.
 
         Returns a list of tuples (minlat, minlon, maxlat, maxlon).
+        Splitting is driven by max_bbox_km (profile, in km); max_request_boxes
+        acts as a hard cap (default 32 when max_bbox_km is set, 1 when area_filter
+        is active, 4 otherwise).
         """
-        max_bboxes = self.profile.get('max_request_boxes', 4)
+        max_bbox_km = self.profile.get('max_bbox_km', None)
+        default_max = 32 if max_bbox_km else (1 if area_filter else 4)
+        max_bboxes = self.profile.get('max_request_boxes', default_max)
         if max_bboxes <= 1 or len(points) <= 1:
             return [self.get_bbox(points)]
 
@@ -171,7 +198,12 @@ class OsmDownloader:
         # height, width, lats, lons
         boxes = [[lats[-1][0]-lats[0][0], lons[-1][0]-lons[0][0], lats, lons]]
         initial_area = boxes[0][0] * boxes[0][1]
+        padding = self.profile.get('bbox_padding', BBOX_PADDING)
         while len(boxes) < max_bboxes and len(boxes) <= len(points):
+            if max_bbox_km and all(
+                self._bbox_max_km(get_bbox(b, padding)) <= max_bbox_km for b in boxes
+            ):
+                break
             candidate_box = None
             area = 0
             point_id = None
@@ -260,19 +292,19 @@ class OsmDownloader:
 
         return result
 
-    def calc_boxes(self, dataset_points):
+    def calc_boxes(self, dataset_points, area_filter=False):
         profile_bbox = self.profile.get('bbox', True)
         if not profile_bbox:
             bboxes = [None]
         elif hasattr(profile_bbox, '__len__') and len(profile_bbox) == 4:
             bboxes = [profile_bbox]
         else:
-            bboxes = self.split_into_bboxes(dataset_points)
+            bboxes = self.split_into_bboxes(dataset_points, area_filter=area_filter)
         return bboxes
 
-    def _fetch_raw(self, bboxes):
-        """Send one Overpass request for the given bboxes; return raw XML bytes."""
-        query = self.construct_overpass_query(bboxes)
+    def _fetch_raw(self, bboxes, area_filter=None):
+        """Send one Overpass request for the given bboxes (or area_filter); return raw XML bytes."""
+        query = self.construct_overpass_query(bboxes, area_filter=area_filter)
         logging.debug('Overpass query: %s', query)
         timeout = self.profile.get('overpass_timeout', 120)
         socket_timeout = None if timeout is None else timeout + 30
@@ -308,14 +340,14 @@ class OsmDownloader:
             raise IOError()
         return r.content
 
-    def _fetch_overpass(self, bboxes):
-        """Send one Overpass request for the given bboxes; return parsed osmdata dict."""
-        return self.parse_xml(self._fetch_raw(bboxes))
+    def _fetch_overpass(self, bboxes, area_filter=None):
+        """Send one Overpass request for the given bboxes (or area_filter); return parsed osmdata dict."""
+        return self.parse_xml(self._fetch_raw(bboxes, area_filter=area_filter))
 
-    def download(self, bboxes=None, bbox_cache_dir=None):
+    def download(self, bboxes=None, bbox_cache_dir=None, area_filter=None):
         """Constructs an Overpass API query and requests objects
-        to match from a server. When multiple bboxes are present,
-        sends one request per bbox and merges results."""
+        to match from a server. Sends one request per bbox (paged); when
+        area_filter is set it is added to every request as a spatial filter."""
         if not bboxes:
             pbbox = self.profile.get('bbox', True)
             if pbbox and hasattr(pbbox, '__len__') and len(pbbox) == 4:
@@ -324,7 +356,7 @@ class OsmDownloader:
                 bboxes = [None]
 
         if len(bboxes) <= 1:
-            return self._fetch_overpass(bboxes)
+            return self._fetch_overpass(bboxes, area_filter=area_filter)
 
         delay = self.profile.get('overpass_request_delay', 5)
         osmdata = {}
@@ -340,7 +372,7 @@ class OsmDownloader:
             if i > 0 and delay:
                 time.sleep(delay)
             logging.info('Downloading bbox %s/%s from Overpass', i + 1, len(bboxes))
-            raw = self._fetch_raw([bbox])
+            raw = self._fetch_raw([bbox], area_filter=area_filter)
             if cache_file:
                 with open(cache_file, 'wb') as f:
                     f.write(raw)
