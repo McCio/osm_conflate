@@ -1,4 +1,5 @@
 import math
+from requests.structures import CaseInsensitiveDict
 from . import etree
 
 
@@ -9,8 +10,8 @@ class SourcePoint:
         self.id = str(pid)
         self.lat = lat
         self.lon = lon
-        self.tags = {} if tags is None else {
-            k: str(v).strip() for k, v in tags.items() if v is not None}
+        self.tags = CaseInsensitiveDict({
+            k: str(v).strip() for k, v in (tags or {}).items() if v is not None})
         self.category = category
         self.dist_offset = 0
         self.remarks = remarks
