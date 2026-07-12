@@ -117,4 +117,4 @@ class Geocoder:
                 else:
                     region = reg.data.country
 
-        return region, not self.filter or (self.negate != (region not in self.filter))
+        return region, not self.filter or (self.f_negate != (region not in self.filter))
