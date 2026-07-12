@@ -3,13 +3,14 @@ import logging
 import os
 import kdtree
 
+_places_tree = None  # module-level cache; built once per process from places.bin
+
 
 class Geocoder:
     def __init__(self, profile_regions='all'):
         self.filter = None
         self.enabled = bool(profile_regions)
         if self.enabled:
-            logging.info('Initializing geocoder (this will take a minute)')
             self.regions = self.parse_regions(profile_regions)
             self.tree = self.load_places_tree()
             if not self.tree:
@@ -30,6 +31,12 @@ class Geocoder:
             self.filter = set(opt_regions)
 
     def load_places_tree(self):
+        global _places_tree
+        if _places_tree is not None:
+            return _places_tree
+
+        logging.info('Initializing geocoder (this will take a minute)')
+
         class PlacePoint:
             def __init__(self, lon, lat, country, region):
                 self.coord = (lon, lat)
@@ -73,7 +80,8 @@ class Geocoder:
                 dlon = f.read(3)
         if not places:
             return None
-        return kdtree.create(places)
+        _places_tree = kdtree.create(places)
+        return _places_tree
 
     def parse_regions(self, profile_regions):
         if not profile_regions or callable(profile_regions):

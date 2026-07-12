@@ -436,9 +436,12 @@ class OsmConflator:
                     elif osmel.action == 'modify':
                         # JOSM needs uid/user/changeset on modified elements for ctrl+H history
                         el.set('action', osmel.action)
-                        el.set('uid', osmel.uid)
-                        el.set('user', osmel.user)
-                        el.set('changeset', osmel.changeset)
+                        if osmel.uid is not None:
+                            el.set('uid', str(osmel.uid))
+                        if osmel.user is not None:
+                            el.set('user', osmel.user)
+                        if osmel.changeset is not None:
+                            el.set('changeset', str(osmel.changeset))
                     else:
                         el.set('action', osmel.action)
                     osc.append(el)
