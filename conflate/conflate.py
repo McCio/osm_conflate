@@ -171,6 +171,13 @@ def run(profile=None):
     logging.info('Downloaded %s objects from OSM', len(conflator.osmdata))
 
     conflator.match()
+    auxiliary_tags = profile.get('auxiliary_tags', set())
+    matched_cleaned = []
+    for point in conflator.matched:
+        new_tags = {key:val for key, val in point.tags.items() if key not in auxiliary_tags}
+        point.tags = new_tags
+        matched_cleaned.append(point)
+    conflator.matched = matched_cleaned
 
     if options.output:
         diff = conflator.to_osc(not options.osc)
