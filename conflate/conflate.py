@@ -4,6 +4,7 @@ import csv
 import json
 import logging
 import os
+import shutil
 import sys
 from .geocoder import Geocoder
 from .profile import Profile
@@ -166,10 +167,13 @@ def run(profile=None):
         with open(options.osm, 'r') as f:
             conflator.parse_osm(f)
     else:
-        conflator.download_osm()
+        bbox_cache_dir = options.osm + '.d' if options.osm else None
+        conflator.download_osm(bbox_cache_dir=bbox_cache_dir)
         if len(conflator.osmdata) > 0 and options.osm:
             with open(options.osm, 'w') as f:
                 f.write(conflator.backup_osm())
+            if bbox_cache_dir and os.path.isdir(bbox_cache_dir):
+                shutil.rmtree(bbox_cache_dir)
     logging.info('Downloaded %s objects from OSM', len(conflator.osmdata))
 
     conflator.match()

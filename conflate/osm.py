@@ -1,6 +1,8 @@
 import logging
-import requests
+import os
 import re
+import time
+import requests
 from .data import OSMPoint
 from . import etree
 from .version import __version__
@@ -28,7 +30,11 @@ class OsmDownloader:
         if server == 'alt':
             OVERPASS_SERVER = ALT_OVERPASS_SERVER
         else:
-            OVERPASS_SERVER = server
+            # Normalise to base URL ending with '/'; strip trailing /interpreter if given
+            s = server.rstrip('/')
+            if s.endswith('/interpreter'):
+                s = s[:-len('interpreter')]
+            OVERPASS_SERVER = s if s.endswith('/') else s + '/'
 
     def construct_overpass_query(self, bboxes):
         """Constructs an Overpass API query from the "query" list in the profile.
@@ -264,25 +270,29 @@ class OsmDownloader:
             bboxes = self.split_into_bboxes(dataset_points)
         return bboxes
 
-    def download(self, bboxes=None):
-        """Constructs an Overpass API query and requests objects
-        to match from a server."""
-        if not bboxes:
-            pbbox = self.profile.get('bbox', True)
-            if pbbox and hasattr(pbbox, '__len__') and len(pbbox) == 4:
-                bboxes = [pbbox]
-            else:
-                bboxes = [None]
-
+    def _fetch_raw(self, bboxes):
+        """Send one Overpass request for the given bboxes; return raw XML bytes."""
         query = self.construct_overpass_query(bboxes)
         logging.debug('Overpass query: %s', query)
-        r = requests.get(OVERPASS_SERVER + 'interpreter', {'data': query}, headers=self._headers())
+        timeout = self.profile.get('overpass_timeout', 120)
+        socket_timeout = None if timeout is None else timeout + 30
+        r = requests.get(OVERPASS_SERVER + 'interpreter', {'data': query},
+                         headers=self._headers(), timeout=socket_timeout)
         if r.encoding is None:
             r.encoding = 'utf-8'
+        if r.status_code in (429, 503, 504):
+            retry_after = int(r.headers.get('Retry-After', 60))
+            wait = retry_after + 1
+            logging.warning('Server returned %s; waiting %s seconds before retry', r.status_code, wait)
+            time.sleep(wait)
+            r = requests.get(OVERPASS_SERVER + 'interpreter', {'data': query},
+                             headers=self._headers(), timeout=socket_timeout)
+            if r.encoding is None:
+                r.encoding = 'utf-8'
         if r.status_code != 200:
             logging.error('Failed to download data from Overpass API: %s', r.status_code)
             if 'rate_limited' in r.text:
-                r = requests.get(OVERPASS_SERVER + 'status')
+                r = requests.get(OVERPASS_SERVER + 'status', headers=self._headers())
                 logging.warning('Seems like you are rate limited. API status:\n%s', r.text)
             else:
                 logging.error('Error message: %s', r.text)
@@ -296,7 +306,46 @@ class OsmDownloader:
             else:
                 logging.error('Runtime error: %s', error)
             raise IOError()
-        return self.parse_xml(r.content)
+        return r.content
+
+    def _fetch_overpass(self, bboxes):
+        """Send one Overpass request for the given bboxes; return parsed osmdata dict."""
+        return self.parse_xml(self._fetch_raw(bboxes))
+
+    def download(self, bboxes=None, bbox_cache_dir=None):
+        """Constructs an Overpass API query and requests objects
+        to match from a server. When multiple bboxes are present,
+        sends one request per bbox and merges results."""
+        if not bboxes:
+            pbbox = self.profile.get('bbox', True)
+            if pbbox and hasattr(pbbox, '__len__') and len(pbbox) == 4:
+                bboxes = [pbbox]
+            else:
+                bboxes = [None]
+
+        if len(bboxes) <= 1:
+            return self._fetch_overpass(bboxes)
+
+        delay = self.profile.get('overpass_request_delay', 5)
+        osmdata = {}
+        if bbox_cache_dir:
+            os.makedirs(bbox_cache_dir, exist_ok=True)
+        for i, bbox in enumerate(bboxes):
+            cache_file = os.path.join(bbox_cache_dir, f'bbox-{i}.osm') if bbox_cache_dir else None
+            if cache_file and os.path.exists(cache_file):
+                logging.info('Loading bbox %s/%s from cache', i + 1, len(bboxes))
+                with open(cache_file, 'rb') as f:
+                    osmdata.update(self.parse_xml(f))
+                continue
+            if i > 0 and delay:
+                time.sleep(delay)
+            logging.info('Downloading bbox %s/%s from Overpass', i + 1, len(bboxes))
+            raw = self._fetch_raw([bbox])
+            if cache_file:
+                with open(cache_file, 'wb') as f:
+                    f.write(raw)
+            osmdata.update(self.parse_xml(raw))
+        return osmdata
 
     def parse_xml(self, fileobj):
         """Parses an OSM XML file into the "osmdata" field. For ways and relations,
