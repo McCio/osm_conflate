@@ -364,7 +364,7 @@ class OsmDownloader:
                 continue
             pt = OSMPoint(
                 el.tag, int(el.get('id')), int(el.get('version')),
-                coord[0], coord[1], tags, categories)
+                coord[0], coord[1], el.get('uid'), el.get('user'), el.get('changeset'), tags, categories)
             pt.members = members
             if pt.is_poi():
                 if callable(weight_fn):

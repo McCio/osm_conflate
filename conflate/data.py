@@ -10,7 +10,7 @@ class SourcePoint:
         self.lat = lat
         self.lon = lon
         self.tags = {} if tags is None else {
-            k.lower(): str(v).strip() for k, v in tags.items() if v is not None}
+            k: str(v).strip() for k, v in tags.items() if v is not None}
         self.category = category
         self.dist_offset = 0
         self.remarks = remarks
@@ -49,7 +49,7 @@ class OSMPoint(SourcePoint):
     """An OSM points is a SourcePoint with a few extra fields.
     Namely, version, members (for ways and relations), and an action.
     The id is compound and created from object type and object id."""
-    def __init__(self, ptype, pid, version, lat, lon, tags=None, categories=None):
+    def __init__(self, ptype, pid, version, lat, lon, uid = None, user = None, changeset = None, tags=None, categories=None):
         super().__init__('{}{}'.format(ptype[0], pid), lat, lon, tags)
         self.tags = {k: v for k, v in self.tags.items() if v is not None and len(v) > 0}
         self.osm_type = ptype
@@ -59,11 +59,17 @@ class OSMPoint(SourcePoint):
         self.action = None
         self.categories = categories or set()
         self.remarks = None
+        self.uid = uid
+        self.user = user
+        self.changeset = changeset
 
     def copy(self):
         """Returns a copy of this object, except for members field."""
         c = OSMPoint(self.osm_type, self.osm_id, self.version, self.lat, self.lon, self.tags.copy())
         c.action = self.action
+        c.user = self.user
+        c.uid = self.uid
+        c.changeset = self.changeset
         c.remarks = self.remarks
         c.categories = self.categories.copy()
         return c
@@ -100,5 +106,5 @@ class OSMPoint(SourcePoint):
         return el
 
     def __repr__(self):
-        return 'OSMPoint({} {} v{}, {}, {}, action={}, tags={})'.format(
-            self.osm_type, self.osm_id, self.version, self.lat, self.lon, self.action, self.tags)
+        return 'OSMPoint({} {} v{}, {}, {}, action={}, user={}, changeset={}, tags={})'.format(
+            self.osm_type, self.osm_id, self.version, self.lat, self.lon, self.action, self.user, self.changeset, self.tags)
