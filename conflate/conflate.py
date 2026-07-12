@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import contextlib
 import csv
 import json
 import logging
@@ -68,14 +69,152 @@ def write_for_filter(profile, dataset, f):
     return True
 
 
-def run(profile=None):
+@contextlib.contextmanager
+def _as_file(arg, mode):
+    """Yield arg as a file object; open it if it's a path string."""
+    if arg is None:
+        yield None
+    elif isinstance(arg, (str, os.PathLike)):
+        with open(arg, mode) as f:
+            yield f
+    else:
+        yield arg
+
+
+def run(
+    profile=None,
+    source=None,
+    output=None,
+    changes=None,
+    osm=None,
+    regions=None,
+    overpass_url=None,
+    alt_overpass=False,
+    contact=None,
+    osc=False,
+    audit=None,
+    param=None,
+    check_move=False,
+    for_filter=None,
+    list_file=None,
+    list_duplicates=False,
+    verbose=False,
+    quiet=False,
+):
+    """Run the conflation pipeline programmatically.
+
+    File arguments (source, output, changes, audit, for_filter, list_file)
+    accept either a path string/PathLike or an already-open file object.
+    profile accepts a Profile object, a file object, or a path string.
+    """
+    if not output and not changes and not for_filter and not list_file:
+        logging.error('No output specified (output, changes, for_filter, or list_file required)')
+        return
+
+    if verbose:
+        log_level = logging.DEBUG
+    elif quiet:
+        log_level = logging.WARNING
+    else:
+        log_level = logging.INFO
+    logging.basicConfig(level=log_level, format='%(asctime)s %(message)s', datefmt='%H:%M:%S')
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+    with contextlib.ExitStack() as stack:
+        src = stack.enter_context(_as_file(source, 'rb'))
+        out = stack.enter_context(_as_file(output, 'w'))
+        chg = stack.enter_context(_as_file(changes, 'w'))
+        aud_f = stack.enter_context(_as_file(audit, 'r'))
+        ff = stack.enter_context(_as_file(for_filter, 'w'))
+        lst = stack.enter_context(_as_file(list_file, 'w'))
+
+        if not isinstance(profile, Profile):
+            logging.debug('Loading profile %s', profile)
+            prof_f = stack.enter_context(_as_file(profile, 'r'))
+            profile = Profile(prof_f, param)
+        else:
+            profile = Profile(profile, param) if param else profile
+
+        aud = json.load(aud_f) if aud_f else None
+
+        geocoder = Geocoder(profile.get_raw('regions'))
+        if regions:
+            geocoder.set_filter(regions)
+        elif aud and aud.get('regions'):
+            geocoder.set_filter(aud.get('regions'))
+
+        dataset = read_dataset(profile, src)
+        if not dataset:
+            logging.error('Empty source dataset')
+            sys.exit(2)
+        transform_dataset(profile, dataset)
+        add_categories_to_dataset(profile, dataset)
+        check_dataset_for_duplicates(profile, dataset, list_duplicates)
+        add_regions(dataset, geocoder)
+        logging.info('Read %s items from the dataset', len(dataset))
+
+        if ff:
+            if write_for_filter(profile, dataset, ff):
+                logging.info('Prepared data for filtering, exitting')
+            return
+
+        conflator = OsmConflator(profile, dataset, aud, contact=contact)
+        conflator.geocoder = geocoder
+        if overpass_url:
+            conflator.set_overpass(overpass_url)
+        elif alt_overpass:
+            conflator.set_overpass('alt')
+
+        osm_path = str(osm) if isinstance(osm, os.PathLike) else osm
+        if osm_path and os.path.exists(osm_path):
+            with open(osm_path, 'r') as f:
+                conflator.parse_osm(f)
+        else:
+            bbox_cache_dir = osm_path + '.d' if osm_path else None
+            conflator.download_osm(bbox_cache_dir=bbox_cache_dir)
+            if len(conflator.osmdata) > 0 and osm_path:
+                with open(osm_path, 'w') as f:
+                    f.write(conflator.backup_osm())
+                if bbox_cache_dir and os.path.isdir(bbox_cache_dir):
+                    shutil.rmtree(bbox_cache_dir)
+        logging.info('Downloaded %s objects from OSM', len(conflator.osmdata))
+
+        conflator.match()
+        auxiliary_tags = profile.get('auxiliary_tags', set())
+        matched_cleaned = []
+        for point in conflator.matched:
+            new_tags = {key: val for key, val in point.tags.items() if key not in auxiliary_tags}
+            point.tags = new_tags
+            matched_cleaned.append(point)
+        conflator.matched = matched_cleaned
+
+        if out:
+            diff = conflator.to_osc(not osc)
+            out.write(diff)
+
+        if chg:
+            if check_move:
+                conflator.check_moveability()
+            fc = {'type': 'FeatureCollection', 'features': conflator.changes}
+            json.dump(fc, chg, ensure_ascii=False, sort_keys=True, indent=1)
+
+        if lst:
+            writer = csv.writer(lst)
+            writer.writerow(['ref', 'osm_type', 'osm_id', 'lat', 'lon', 'action'])
+            for row in conflator.matches:
+                writer.writerow(row)
+
+    logging.info('Done')
+
+
+def main():
     parser = argparse.ArgumentParser(
         description='''{}.
         Reads a profile with source data and conflates it with OpenStreetMap data.
         Produces an JOSM XML file ready to be uploaded.'''.format(TITLE))
-    if not profile:
-        parser.add_argument('profile', type=argparse.FileType('r'),
-                            help='Name of a profile (python or json) to use')
+    parser.add_argument('profile', type=argparse.FileType('r'),
+                        help='Name of a profile (python or json) to use')
     parser.add_argument('-i', '--source', type=argparse.FileType('rb'),
                         help='Source file to pass to the profile dataset() function')
     parser.add_argument('-a', '--audit', type=argparse.FileType('r'),
@@ -113,92 +252,23 @@ def run(profile=None):
                         help='Do not display informational messages')
     options = parser.parse_args()
 
-    if (not options.output and not options.changes and
-            not options.for_filter and not options.list):
-        parser.print_help()
-        return
-
-    if options.verbose:
-        log_level = logging.DEBUG
-    elif options.quiet:
-        log_level = logging.WARNING
-    else:
-        log_level = logging.INFO
-    logging.basicConfig(level=log_level, format='%(asctime)s %(message)s', datefmt='%H:%M:%S')
-    logging.getLogger("requests").setLevel(logging.WARNING)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-
-    if not profile:
-        logging.debug('Loading profile %s', options.profile)
-    profile = Profile(profile or options.profile, options.param)
-
-    audit = None
-    if options.audit:
-        audit = json.load(options.audit)
-
-    geocoder = Geocoder(profile.get_raw('regions'))
-    if options.regions:
-        geocoder.set_filter(options.regions)
-    elif audit and audit.get('regions'):
-        geocoder.set_filter(audit.get('regions'))
-
-    dataset = read_dataset(profile, options.source)
-    if not dataset:
-        logging.error('Empty source dataset')
-        sys.exit(2)
-    transform_dataset(profile, dataset)
-    add_categories_to_dataset(profile, dataset)
-    check_dataset_for_duplicates(profile, dataset, options.list_duplicates)
-    add_regions(dataset, geocoder)
-    logging.info('Read %s items from the dataset', len(dataset))
-
-    if options.for_filter:
-        if write_for_filter(profile, dataset, options.for_filter):
-            logging.info('Prepared data for filtering, exitting')
-        return
-
-    conflator = OsmConflator(profile, dataset, audit, contact=options.contact)
-    conflator.geocoder = geocoder
-    if options.overpass_url:
-        conflator.set_overpass(options.overpass_url)
-    elif options.alt_overpass:
-        conflator.set_overpass('alt')
-    if options.osm and os.path.exists(options.osm):
-        with open(options.osm, 'r') as f:
-            conflator.parse_osm(f)
-    else:
-        bbox_cache_dir = options.osm + '.d' if options.osm else None
-        conflator.download_osm(bbox_cache_dir=bbox_cache_dir)
-        if len(conflator.osmdata) > 0 and options.osm:
-            with open(options.osm, 'w') as f:
-                f.write(conflator.backup_osm())
-            if bbox_cache_dir and os.path.isdir(bbox_cache_dir):
-                shutil.rmtree(bbox_cache_dir)
-    logging.info('Downloaded %s objects from OSM', len(conflator.osmdata))
-
-    conflator.match()
-    auxiliary_tags = profile.get('auxiliary_tags', set())
-    matched_cleaned = []
-    for point in conflator.matched:
-        new_tags = {key:val for key, val in point.tags.items() if key not in auxiliary_tags}
-        point.tags = new_tags
-        matched_cleaned.append(point)
-    conflator.matched = matched_cleaned
-
-    if options.output:
-        diff = conflator.to_osc(not options.osc)
-        options.output.write(diff)
-
-    if options.changes:
-        if options.check_move:
-            conflator.check_moveability()
-        fc = {'type': 'FeatureCollection', 'features': conflator.changes}
-        json.dump(fc, options.changes, ensure_ascii=False, sort_keys=True, indent=1)
-
-    if options.list:
-        writer = csv.writer(options.list)
-        writer.writerow(['ref', 'osm_type', 'osm_id', 'lat', 'lon', 'action'])
-        for row in conflator.matches:
-            writer.writerow(row)
-
-    logging.info('Done')
+    run(
+        profile=options.profile,
+        source=options.source,
+        output=options.output,
+        changes=options.changes,
+        osm=options.osm,
+        regions=options.regions,
+        overpass_url=options.overpass_url,
+        alt_overpass=options.alt_overpass,
+        contact=options.contact,
+        osc=options.osc,
+        audit=options.audit,
+        param=options.param,
+        check_move=options.check_move,
+        for_filter=options.for_filter,
+        list_file=options.list,
+        list_duplicates=options.list_duplicates,
+        verbose=options.verbose,
+        quiet=options.quiet,
+    )

@@ -32,6 +32,6 @@ setup(
         'Programming Language :: Python :: 3 :: Only',
     ],
     entry_points={
-        'console_scripts': ['conflate = conflate:run']
+        'console_scripts': ['conflate = conflate.conflate:main']
     },
 )
