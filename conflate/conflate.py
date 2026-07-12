@@ -102,6 +102,8 @@ def run(profile=None):
                         help='Conflate only points with regions in this comma-separated list')
     parser.add_argument('--alt-overpass', action='store_true',
                         help='Use an alternate Overpass API server')
+    parser.add_argument('--overpass-url',
+                        help='Query an Overpass server on this URL')
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Display debug messages')
     parser.add_argument('-q', '--quiet', action='store_true',
@@ -154,7 +156,9 @@ def run(profile=None):
 
     conflator = OsmConflator(profile, dataset, audit)
     conflator.geocoder = geocoder
-    if options.alt_overpass:
+    if options.overpass_url:
+        conflator.set_overpass(options.overpass_url)
+    elif options.alt_overpass:
         conflator.set_overpass('alt')
     if options.osm and os.path.exists(options.osm):
         with open(options.osm, 'r') as f:
