@@ -20,7 +20,7 @@ class OsmConflator:
     "download_osm" or "parse_osm" methods. Then it is ready to match:
     call the "match" method and get results with "to_osc".
     """
-    def __init__(self, profile, dataset, audit=None):
+    def __init__(self, profile, dataset, audit=None, contact=None):
         self.dataset = {p.id: p for p in dataset}
         self.audit = audit or {}
         self.osmdata = {}
@@ -29,7 +29,7 @@ class OsmConflator:
         self.matches = []
         self.profile = profile
         self.geocoder = None
-        self.downloader = OsmDownloader(profile)
+        self.downloader = OsmDownloader(profile, contact=contact)
         self.source = self.profile.get(
             'source', required='value of "source" tag for uploaded OSM objects')
         self.add_source_tag = self.profile.get('add_source', False)

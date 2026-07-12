@@ -104,6 +104,8 @@ def run(profile=None):
                         help='Use an alternate Overpass API server')
     parser.add_argument('--overpass-url',
                         help='Query an Overpass server on this URL')
+    parser.add_argument('--contact',
+                        help='Contact reference included in the User-Agent header (e.g. a URL or email)')
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Display debug messages')
     parser.add_argument('-q', '--quiet', action='store_true',
@@ -154,7 +156,7 @@ def run(profile=None):
             logging.info('Prepared data for filtering, exitting')
         return
 
-    conflator = OsmConflator(profile, dataset, audit)
+    conflator = OsmConflator(profile, dataset, audit, contact=options.contact)
     conflator.geocoder = geocoder
     if options.overpass_url:
         conflator.set_overpass(options.overpass_url)

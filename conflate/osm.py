@@ -3,6 +3,7 @@ import requests
 import re
 from .data import OSMPoint
 from . import etree
+from .version import __version__
 
 
 OVERPASS_SERVER = 'https://overpass-api.de/api/'
@@ -12,8 +13,15 @@ BBOX_PADDING = 0.003  # in degrees, ~330 m default
 
 
 class OsmDownloader:
-    def __init__(self, profile):
+    def __init__(self, profile, contact=None):
         self.profile = profile
+        self.contact = contact
+
+    def _headers(self):
+        ua = f'osm-conflate/{__version__}'
+        if self.contact:
+            ua += f' ({self.contact})'
+        return {'User-Agent': ua}
 
     def set_overpass(self, server='alt'):
         global OVERPASS_SERVER
@@ -268,7 +276,7 @@ class OsmDownloader:
 
         query = self.construct_overpass_query(bboxes)
         logging.debug('Overpass query: %s', query)
-        r = requests.get(OVERPASS_SERVER + 'interpreter', {'data': query})
+        r = requests.get(OVERPASS_SERVER + 'interpreter', {'data': query}, headers=self._headers())
         if r.encoding is None:
             r.encoding = 'utf-8'
         if r.status_code != 200:
